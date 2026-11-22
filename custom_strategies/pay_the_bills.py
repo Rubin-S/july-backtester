@@ -10,13 +10,14 @@ default equal-weight (``fixed``, 10% per ETF) sizing and realistic costs.
 
 Reproducible official run (10-ETF macro universe, 2008-01-01 to 2026-11-20):
     python main.py \\
-        --name ptb-official \\
+        --name ptb-final \\
         --provider yahoo \\
         --symbols SPY QQQ IWM EFA XLP XLU XLV IEF GLD DBC \\
         --start 2008-01-01 --end 2026-11-20 \\
         --strategies "Trend Vol-Guard (EMA20/SMA150)" \\
         --wfa-split 0.80 --wfa-folds 3 \\
         --mc-sampling block --seed 42 --verbose
+    python report.py --all output/runs/<run_id>
 """
 
 import numpy as np
@@ -69,17 +70,34 @@ def trend_vol_guard(df, **kwargs):
         Maximum allowed ratio of short-term to baseline realized volatility
         (default: 1.50). Readings at or above this threshold force an exit.
     """
-    fast_len = int(kwargs["fast_ema"])
-    slow_len = int(kwargs["slow_sma"])
-    vol_baseline = int(kwargs["vol_baseline"])
-    vol_shock_max = float(kwargs["vol_shock_max"])
+    raw_fast = kwargs["fast_ema"]
+    raw_slow = kwargs["slow_sma"]
+    raw_base = kwargs["vol_baseline"]
+    raw_shock = kwargs["vol_shock_max"]
+    if any(isinstance(v, bool) for v in (raw_fast, raw_slow, raw_base, raw_shock)):
+        raise ValueError(
+            f"Boolean parameters are not allowed: fast_ema={raw_fast}, "
+            f"slow_sma={raw_slow}, vol_baseline={raw_base}, vol_shock_max={raw_shock}"
+        )
 
-    if fast_len < 1 or slow_len < 1 or vol_baseline < 2 or vol_shock_max <= 0:
+    fast_len = int(raw_fast)
+    slow_len = int(raw_slow)
+    vol_baseline = int(raw_base)
+    vol_shock_max = float(raw_shock)
+
+    if (
+        fast_len < 1
+        or slow_len < 1
+        or vol_baseline < 2
+        or not np.isfinite(vol_shock_max)
+        or vol_shock_max <= 0
+    ):
         raise ValueError(
             f"Invalid parameters: fast_ema={fast_len}, slow_sma={slow_len}, "
             f"vol_baseline={vol_baseline}, vol_shock_max={vol_shock_max}"
         )
 
+    df = df.copy()
     if df.empty:
         df["Signal"] = pd.Series(dtype=int, index=df.index)
         return df

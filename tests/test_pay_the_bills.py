@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -26,6 +27,7 @@ if PROJECT_ROOT not in sys.path:
 
 from helpers.portfolio_simulations import run_portfolio_simulation  # noqa: E402
 from helpers.registry import get_active_strategies  # noqa: E402
+from helpers.timeframe_utils import get_bars_for_period  # noqa: E402
 
 STRATEGY_NAME = "Trend Vol-Guard (EMA20/SMA150)"
 
@@ -195,14 +197,71 @@ def test_edge_cases_empty_short_flat_and_zero_price(strategy_entry):
         {"vol_baseline": 1},
         {"vol_shock_max": 0.0},
         {"vol_shock_max": -1.0},
+        {"vol_shock_max": float("nan")},
+        {"vol_shock_max": float("inf")},
+        {"vol_shock_max": float("-inf")},
+        {"fast_ema": True},
+        {"slow_sma": False},
+        {"vol_baseline": True},
+        {"vol_shock_max": True},
     ],
 )
 def test_invalid_parameters_raise_value_error(strategy_entry, bad_override):
-    """Non-sensical parameter configurations fail fast with ValueError."""
+    """Non-sensical, non-finite, or boolean parameters fail fast with ValueError."""
     df = _make_multi_regime_ohlcv(n=200)
     params = {**strategy_entry["params"], **bad_override}
     with pytest.raises(ValueError):
         strategy_entry["logic"](df, **params)
+
+
+def test_slice_input_no_warning_and_no_caller_mutation(strategy_entry):
+    """Passing a DataFrame slice emits no SettingWithCopyWarning and does not mutate caller."""
+    full_df = _make_multi_regime_ohlcv(n=240, seed=5)
+    sliced = full_df.iloc[10:]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = strategy_entry["logic"](sliced, **strategy_entry["params"])
+
+    setting_warnings = [w for w in caught if "SettingWithCopy" in str(w.message)]
+    assert setting_warnings == [], f"Unexpected SettingWithCopyWarning: {setting_warnings}"
+    assert "Signal" not in full_df.columns
+    assert "Signal" not in sliced.columns
+    assert "Signal" in out.columns
+
+
+@pytest.mark.parametrize(
+    "tf,mul,n_bars",
+    [
+        ("D", 1, 220),
+        ("W", 1, 80),
+        ("M", 1, 40),
+        ("H", 4, 300),
+    ],
+)
+def test_cross_timeframe_parameter_resolution(strategy_entry, tf, mul, n_bars):
+    """Strategy executes cleanly across daily, weekly, monthly (fast_ema=1), and intraday bars."""
+    params = {
+        "fast_ema": get_bars_for_period("20d", tf, mul),
+        "slow_sma": get_bars_for_period("150d", tf, mul),
+        "vol_baseline": get_bars_for_period("126d", tf, mul),
+        "vol_shock_max": 1.50,
+    }
+    df = _make_multi_regime_ohlcv(n=n_bars, seed=31)
+    out = strategy_entry["logic"](df, **params)
+
+    assert not out["Signal"].isna().any()
+    assert out["Signal"].isin([-1, 0, 1]).all()
+    assert pd.api.types.is_integer_dtype(out["Signal"])
+    assert (out["Signal"] != 0).any()
+
+
+def test_determinism_across_repeated_calls(strategy_entry):
+    """Repeated invocations on identical input return bit-for-bit identical signals."""
+    df = _make_multi_regime_ohlcv(n=300, seed=17)
+    out1 = strategy_entry["logic"](df, **strategy_entry["params"])["Signal"]
+    out2 = strategy_entry["logic"](df, **strategy_entry["params"])["Signal"]
+    pd.testing.assert_series_equal(out1, out2)
 
 
 def test_engine_integration_portfolio_simulation(strategy_entry):
